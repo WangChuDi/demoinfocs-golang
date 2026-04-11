@@ -128,6 +128,10 @@ func (f *field) setModel(model int) {
 }
 
 func (f *field) getName() string {
+	if f.sendNode != "" {
+		return f.sendNode + "." + f.varName
+	}
+
 	return f.varName
 }
 
@@ -154,7 +158,7 @@ func (f *field) getFieldForFieldPath(fp *fieldPath, pos int) *field {
 }
 
 func (f *field) getNameForFieldPath(fp *fieldPath, pos int) []string {
-	x := []string{f.varName}
+	x := []string{f.getName()}
 
 	switch f.model {
 	case fieldModelFixedArray:

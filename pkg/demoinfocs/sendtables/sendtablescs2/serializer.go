@@ -70,14 +70,13 @@ func (s *serializer) getFieldPathForName(fp *fieldPath, name string) bool {
 		return true
 	}
 
-	dotIndex := strings.Index(name, ".")
-	if dotIndex != -1 {
+	for dotIndex := strings.LastIndex(name, "."); dotIndex != -1; dotIndex = strings.LastIndex(name[:dotIndex], ".") {
 		nameBeforeDot := name[:dotIndex]
 		if s.fieldIndexes[nameBeforeDot] != nil {
 			fp.path[fp.last] = s.fieldIndexes[nameBeforeDot].index
 			fp.last++
 			f := s.fieldIndexes[nameBeforeDot].field
-			return f.getFieldPathForName(fp, name[len(f.varName)+1:])
+			return f.getFieldPathForName(fp, name[dotIndex+1:])
 		}
 	}
 
@@ -103,9 +102,16 @@ func (s *serializer) addField(f *field) {
 	newFieldIndex := len(s.fields)
 	s.fields = append(s.fields, f)
 
-	s.fieldIndexes[f.varName] = &fieldIndex{
+	idx := &fieldIndex{
 		index: newFieldIndex,
 		field: f,
+	}
+
+	s.fieldIndexes[f.varName] = idx
+
+	qualifiedName := f.getName()
+	if qualifiedName != f.varName {
+		s.fieldIndexes[qualifiedName] = idx
 	}
 }
 
