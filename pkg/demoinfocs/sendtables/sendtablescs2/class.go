@@ -46,7 +46,7 @@ func (c *class) String() string {
 	props := make([]string, 0, len(c.serializer.fields))
 
 	for _, f := range c.serializer.fields {
-		props = append(props, fmt.Sprintf("%s: %s", f.varName, f.varType))
+		props = append(props, fmt.Sprintf("%s: %s", f.name, f.varType))
 	}
 
 	return fmt.Sprintf("%d %s\n %s", c.classId, c.name, strings.Join(props, "\n "))
@@ -60,7 +60,7 @@ func (c *class) collectFieldsEntries(fields []*field, prefix string) []string {
 			subPaths := c.collectFieldsEntries(field.serializer.fields, prefix+field.serializer.name+".")
 			paths = append(paths, subPaths...)
 		} else {
-			paths = append(paths, prefix+field.varName)
+			paths = append(paths, prefix+field.name)
 		}
 	}
 
@@ -74,15 +74,20 @@ func fpFlatKey(fp *fieldPath) (uint64, bool) {
 	if fp.last > 3 {
 		return 0, false
 	}
+
 	var key uint64
+
 	for i := 0; i <= fp.last; i++ {
 		v := fp.path[i]
-		if uint(v) > 0x3FFF { //nolint:gosec // 14-bit range: 0–16383
+		if uint(v) > 0x3FFF {
 			return 0, false
 		}
-		key |= uint64(v) << uint(i*14) //nolint:gosec
+
+		key |= uint64(v) << uint(i*14)
 	}
-	key |= uint64(fp.last) << 56 //nolint:gosec
+
+	key |= uint64(fp.last) << 56
+
 	return key, true
 }
 
@@ -91,13 +96,16 @@ func (c *class) getNameForFieldPath(fp *fieldPath) string {
 		if name, hit := c.fpFlatCache[key]; hit {
 			return name
 		}
+
 		name := strings.Join(c.serializer.getNameForFieldPath(fp, 0), ".")
 		c.fpFlatCache[key] = name
+
 		return name
 	}
 
 	// Slow path: deep or large-component path — use the pointer tree.
 	currentCacheNode := c.fpNameCache
+
 	for i := 0; i <= fp.last; i++ {
 		pos := fp.path[i]
 		if pos >= len(currentCacheNode.next) {
@@ -109,19 +117,24 @@ func (c *class) getNameForFieldPath(fp *fieldPath) string {
 				if newCap < 8 {
 					newCap = 8
 				}
+
 				newNext := make([]*fpNameTreeCache, needed, newCap)
 				copy(newNext, currentCacheNode.next)
 				currentCacheNode.next = newNext
 			}
 		}
+
 		if currentCacheNode.next[pos] == nil {
 			currentCacheNode.next[pos] = &fpNameTreeCache{}
 		}
+
 		currentCacheNode = currentCacheNode.next[pos]
 	}
+
 	if currentCacheNode.name == "" {
 		currentCacheNode.name = strings.Join(c.serializer.getNameForFieldPath(fp, 0), ".")
 	}
+
 	return currentCacheNode.name
 }
 

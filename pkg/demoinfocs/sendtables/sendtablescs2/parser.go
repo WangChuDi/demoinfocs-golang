@@ -70,7 +70,7 @@ type Parser struct {
 	packetEntitiesPanicWarnFunc func(error)
 }
 
-func (p *Parser) ReadEnterPVS(r *bit.BitReader, index int, entities map[int]st.Entity, slot int) st.Entity { //nolint:revive
+func (p *Parser) ReadEnterPVS(r *bit.BitReader, index int, entities map[int]st.Entity, slot int) st.Entity {
 	panic("implement me")
 }
 
@@ -132,11 +132,11 @@ func (p *Parser) OnDemoClassInfo(m *msg.CDemoClassInfo) error {
 		networkName := c.GetNetworkName()
 
 		class := &class{
-			classId:    classId,
-			name:       networkName,
-			serializer: p.serializers[networkName],
-			fpNameCache:  &fpNameTreeCache{},
-			fpFlatCache:  make(map[uint64]string),
+			classId:     classId,
+			name:        networkName,
+			serializer:  p.serializers[networkName],
+			fpNameCache: &fpNameTreeCache{},
+			fpFlatCache: make(map[uint64]string),
 		}
 		p.classesById[class.classId] = class
 		p.classesByName[class.name] = class
@@ -156,7 +156,7 @@ func (p *Parser) SetInstanceBaseline(scID int, data []byte) {
 	p.classBaselines[int32(scID)] = data
 }
 
-//nolint:gocognit
+//nolint:gocognit,funlen
 func (p *Parser) ParsePacket(b []byte) error {
 	r := newReader(b)
 	buf := r.readBytes(r.readVarUint32())
@@ -170,11 +170,17 @@ func (p *Parser) ParsePacket(b []byte) error {
 	fields := map[int32]*field{}
 	fieldTypes := map[string]*fieldType{}
 
+	// all serializer instances of this message, including ones later shadowed
+	// in p.serializers by another version of the same name; they stay reachable
+	// through field.serializer/polyTypes and must be re-keyed on renames too
+	serializers := make([]*serializer, 0, len(msg.GetSerializers()))
+
 	for _, s := range msg.GetSerializers() {
 		serializer := newSerializer(
 			msg.GetSymbols()[s.GetSerializerNameSym()],
 			s.GetSerializerVersion(),
 		)
+		serializers = append(serializers, serializer)
 
 		for _, i := range s.GetFieldsIndex() {
 			if _, ok := fields[i]; !ok { //nolint:nestif
@@ -190,6 +196,7 @@ func (p *Parser) ParsePacket(b []byte) error {
 				if _, ok := fieldTypes[field.varType]; !ok {
 					fieldTypes[field.varType] = newFieldType(field.varType)
 				}
+
 				field.fieldType = fieldTypes[field.varType]
 
 				// find associated serializer
@@ -232,6 +239,8 @@ func (p *Parser) ParsePacket(b []byte) error {
 			p.classesByName[serializer.name].serializer = serializer
 		}
 	}
+
+	resolveFieldNameCollisions(serializers)
 
 	return nil
 }
