@@ -53,27 +53,37 @@ var userCmdButtonsPath = [...]protowire.Number{1, 3, 1}
 // resets a target field to its protobuf default, including when the marker is on
 // base or buttons_pb.
 //
-//nolint:gocognit,funlen
 func mergeUserCmdButtons(data []byte, level int, buttons *uint64) error {
+	_, err := mergeUserCmdButtonsWithPresence(data, level, buttons)
+	return err
+}
+
+// The presence flag distinguishes an absolute button value (including an
+// explicit zero or parent reset) from an unrelated delta that needs a baseline.
+//
+//nolint:gocognit,funlen
+func mergeUserCmdButtonsWithPresence(data []byte, level int, buttons *uint64) (bool, error) {
 	if level >= len(userCmdButtonsPath) {
-		return errors.New("invalid user command button path")
+		return false, errors.New("invalid user command button path")
 	}
 
 	target := userCmdButtonsPath[level]
+	present := false
 
 	for len(data) > 0 {
 		num, typ, tagLen := protowire.ConsumeTag(data)
 		if tagLen < 0 {
-			return fmt.Errorf("failed to read user command button tag: %w", protowire.ParseError(tagLen))
+			return false, fmt.Errorf("failed to read user command button tag: %w", protowire.ParseError(tagLen))
 		}
 
 		if num == 0 {
-			return errors.New("user command button field number must be non-zero")
+			return false, errors.New("user command button field number must be non-zero")
 		}
 
 		if typ == wireTypeReset {
 			if num == target {
 				*buttons = 0
+				present = true
 			}
 
 			data = data[tagLen:]
@@ -84,7 +94,7 @@ func mergeUserCmdButtons(data []byte, level int, buttons *uint64) error {
 		if num != target {
 			valueLen := protowire.ConsumeFieldValue(num, typ, data[tagLen:])
 			if valueLen < 0 {
-				return fmt.Errorf("failed to skip user command field: %w", protowire.ParseError(valueLen))
+				return false, fmt.Errorf("failed to skip user command field: %w", protowire.ParseError(valueLen))
 			}
 
 			data = data[tagLen+valueLen:]
@@ -94,37 +104,40 @@ func mergeUserCmdButtons(data []byte, level int, buttons *uint64) error {
 
 		if level == len(userCmdButtonsPath)-1 {
 			if typ != protowire.VarintType {
-				return fmt.Errorf("buttonstate1 uses unexpected wire type %d", typ)
+				return false, fmt.Errorf("buttonstate1 uses unexpected wire type %d", typ)
 			}
 
 			value, valueLen := protowire.ConsumeVarint(data[tagLen:])
 			if valueLen < 0 {
-				return fmt.Errorf("failed to read buttonstate1: %w", protowire.ParseError(valueLen))
+				return false, fmt.Errorf("failed to read buttonstate1: %w", protowire.ParseError(valueLen))
 			}
 
 			*buttons = value
+			present = true
 			data = data[tagLen+valueLen:]
 
 			continue
 		}
 
 		if typ != protowire.BytesType {
-			return fmt.Errorf("user command button message uses unexpected wire type %d", typ)
+			return false, fmt.Errorf("user command button message uses unexpected wire type %d", typ)
 		}
 
 		value, valueLen := protowire.ConsumeBytes(data[tagLen:])
 		if valueLen < 0 {
-			return fmt.Errorf("failed to read user command button message: %w", protowire.ParseError(valueLen))
+			return false, fmt.Errorf("failed to read user command button message: %w", protowire.ParseError(valueLen))
 		}
 
-		if err := mergeUserCmdButtons(value, level+1, buttons); err != nil {
-			return err
+		nestedPresent, err := mergeUserCmdButtonsWithPresence(value, level+1, buttons)
+		if err != nil {
+			return false, err
 		}
+		present = present || nestedPresent
 
 		data = data[tagLen+valueLen:]
 	}
 
-	return nil
+	return present, nil
 }
 
 //nolint:gocognit,nestif,funlen
@@ -148,6 +161,7 @@ func (p *parser) handleUserCommandButtons(m *msgs2.CSVCMsg_UserCommands) {
 		}
 
 		var buttons uint64
+		hasBaseline := false
 		if data := cmd.GetData(); len(data) > 0 {
 			if err := mergeUserCmdButtons(data, 0, &buttons); err != nil {
 				p.msgDispatcher.Dispatch(events.ParserWarn{
@@ -157,48 +171,53 @@ func (p *parser) handleUserCommandButtons(m *msgs2.CSVCMsg_UserCommands) {
 
 				continue
 			}
+			hasBaseline = true
 		} else if len(cmd.GetDeltaData()) > 0 {
-			if !state.hasCurrentCommand {
-				p.msgDispatcher.Dispatch(events.ParserWarn{
-					Message: fmt.Sprintf("user command %d has no baseline for player slot %d", cmd.GetCmdNumber(), slot),
-					Type:    events.WarnTypeUserCommandBaselineMissing,
-				})
+			if state.hasCurrentCommand {
+				requestedBaseline := state.currentCommandNumber
+				if cmd.GetCmdNumber() < requestedBaseline {
+					p.msgDispatcher.Dispatch(events.ParserWarn{
+						Message: fmt.Sprintf("user command %d precedes its current baseline %d for player slot %d", cmd.GetCmdNumber(), requestedBaseline, slot),
+						Type:    events.WarnTypeUserCommandBaselineMismatch,
+					})
 
-				continue
-			}
+					continue
+				}
 
-			requestedBaseline := state.currentCommandNumber
-			if cmd.GetCmdNumber() < requestedBaseline {
-				p.msgDispatcher.Dispatch(events.ParserWarn{
-					Message: fmt.Sprintf("user command %d precedes its current baseline %d for player slot %d", cmd.GetCmdNumber(), requestedBaseline, slot),
-					Type:    events.WarnTypeUserCommandBaselineMismatch,
-				})
+				var found bool
 
-				continue
-			}
+				buttons, found = state.ring.get(requestedBaseline)
+				if !found {
+					p.msgDispatcher.Dispatch(events.ParserWarn{
+						Message: fmt.Sprintf("user command %d has a baseline ring mismatch for player slot %d (requested %d)", cmd.GetCmdNumber(), slot, requestedBaseline),
+						Type:    events.WarnTypeUserCommandBaselineMismatch,
+					})
 
-			var found bool
-
-			buttons, found = state.ring.get(requestedBaseline)
-			if !found {
-				p.msgDispatcher.Dispatch(events.ParserWarn{
-					Message: fmt.Sprintf("user command %d has a baseline ring mismatch for player slot %d (requested %d)", cmd.GetCmdNumber(), slot, requestedBaseline),
-					Type:    events.WarnTypeUserCommandBaselineMismatch,
-				})
-
-				continue
+					continue
+				}
+				hasBaseline = true
 			}
 		} else {
 			continue
 		}
 
 		if deltaData := cmd.GetDeltaData(); len(deltaData) > 0 {
-			if err := mergeUserCmdButtons(deltaData, 0, &buttons); err != nil {
+			present, err := mergeUserCmdButtonsWithPresence(deltaData, 0, &buttons)
+			if err != nil {
 				p.msgDispatcher.Dispatch(events.ParserWarn{
 					Message: err.Error(),
 					Type:    events.WarnTypeUserCommandDeltaDecodeFailed,
 				})
 
+				continue
+			}
+			// A delta can establish the button-only baseline without a full
+			// user command when it explicitly replaces or resets buttonstate1.
+			if !hasBaseline && !present {
+				p.msgDispatcher.Dispatch(events.ParserWarn{
+					Message: fmt.Sprintf("user command %d has no baseline for player slot %d", cmd.GetCmdNumber(), slot),
+					Type:    events.WarnTypeUserCommandBaselineMissing,
+				})
 				continue
 			}
 		}
